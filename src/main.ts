@@ -1,5 +1,6 @@
 import "./style.css";
 import triangleShader from "./shaders/triangle.wgsl";
+import computeShader from "./shaders/compute.wgsl";
 
 async function init(): Promise<{
   device: GPUDevice;
@@ -118,8 +119,98 @@ function renderTriangle(device: GPUDevice, context: GPUCanvasContext) {
   passEncoder.draw(3);
   passEncoder.end();
   device.queue.submit([commandEncoder.finish()]);
+
+  return { device, context };
 }
 
-await init().then(({ device, context }) => {
-  renderTriangle(device, context);
-});
+async function computeSomething(device: GPUDevice) {
+  // Create buffers to handle our data
+  const BUFFER_SIZE = 1000;
+  const shaderModule = device.createShaderModule({
+    code: computeShader,
+  });
+
+  const output = device.createBuffer({
+    size: BUFFER_SIZE,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+  });
+
+  const stagingBuffer = device.createBuffer({
+    size: BUFFER_SIZE,
+    usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+  });
+
+  // Create a bind group layout
+  const bindGroupLayout = device.createBindGroupLayout({
+    entries: [
+      {
+        binding: 0, // bind to slot 0, matches the @binding(0) in the shader code
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: {
+          type: "storage",
+        },
+      },
+    ],
+  });
+
+  const bindGroup = device.createBindGroup({
+    layout: bindGroupLayout,
+    entries: [
+      {
+        binding: 0,
+        resource: {
+          buffer: output,
+        },
+      },
+    ],
+  });
+
+  // Create a compute pipeline
+  const computePipeline = device.createComputePipeline({
+    layout: device.createPipelineLayout({
+      bindGroupLayouts: [bindGroupLayout],
+    }),
+    compute: {
+      module: shaderModule,
+      entryPoint: "main",
+    },
+  });
+
+  // Running a compute pass
+  const commandEncoder = device.createCommandEncoder();
+  const passEncoder = commandEncoder.beginComputePass();
+  passEncoder.setPipeline(computePipeline);
+  passEncoder.setBindGroup(0, bindGroup);
+  passEncoder.dispatchWorkgroups(Math.ceil(BUFFER_SIZE / 64));
+
+  passEncoder.end();
+
+  // Reading the results back to JavaScript
+  // Copy output buffer to staging buffer
+  commandEncoder.copyBufferToBuffer(
+    output,
+    0, // Source offset
+    stagingBuffer,
+    0, // Destination offset
+    BUFFER_SIZE
+  );
+
+  // End frame by passing array of command buffers to command queue for execution
+  device.queue.submit([commandEncoder.finish()]);
+
+  // map staging buffer to read results back to JS
+  await stagingBuffer.mapAsync(
+    GPUMapMode.READ,
+    0, // Offset
+    BUFFER_SIZE // Length
+  );
+
+  const copyArrayBuffer = stagingBuffer.getMappedRange(0, BUFFER_SIZE);
+  const data = copyArrayBuffer.slice(0);
+  stagingBuffer.unmap();
+  console.log(new Float32Array(data));
+}
+
+await init()
+  .then(({ device, context }) => renderTriangle(device, context))
+  .then(({ device }) => computeSomething(device));
